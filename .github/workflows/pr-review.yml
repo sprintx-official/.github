@@ -76,16 +76,9 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Run Gemini PR Review
-        id: review
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GEMINI_MODEL: ${{ inputs.model }}
+      - name: Create review script
         run: |
-          node << 'NODE_EOF'
+          cat > review_script.js << 'SCRIPT_EOF'
           const fs = require('fs');
           const https = require('https');
 
@@ -99,63 +92,63 @@ jobs:
 
           const prompt = `You are an expert code reviewer. Review the following PR diff against the project standards and conventions.
 
-## Project Standards
+          ## Project Standards
 
-${project}
+          ${project}
 
-## Coding Conventions
+          ## Coding Conventions
 
-${conventions}
+          ${conventions}
 
-## PR Information
+          ## PR Information
 
-**Title:** ${prTitle}
-**Description:** ${prBody}
+          **Title:** ${prTitle}
+          **Description:** ${prBody}
 
-## Changed Files
+          ## Changed Files
 
-${changedFiles}
+          ${changedFiles}
 
-## Code Diff
+          ## Code Diff
 
-\`\`\`diff
-${diff}
-\`\`\`
+          \`\`\`diff
+          ${diff}
+          \`\`\`
 
-## Review Instructions
+          ## Review Instructions
 
-Analyze the code and provide your review in TWO parts:
+          Analyze the code and provide your review in TWO parts:
 
-### PART 1: Inline Comments (JSON)
-Return a JSON array of inline comments for specific lines. Each comment should target a specific line in the diff.
-IMPORTANT: Only comment on lines that were ADDED (lines starting with +) in the diff.
+          ### PART 1: Inline Comments (JSON)
+          Return a JSON array of inline comments for specific lines. Each comment should target a specific line in the diff.
+          IMPORTANT: Only comment on lines that were ADDED (lines starting with +) in the diff.
 
-Format:
-\`\`\`json
-[
-  {
-    "file": "path/to/file.tsx",
-    "line": 10,
-    "severity": "critical|warning|suggestion",
-    "comment": "Brief description of the issue and how to fix it"
-  }
-]
-\`\`\`
+          Format:
+          \`\`\`json
+          [
+            {
+              "file": "path/to/file.tsx",
+              "line": 10,
+              "severity": "critical|warning|suggestion",
+              "comment": "Brief description of the issue and how to fix it"
+            }
+          ]
+          \`\`\`
 
-Rules for inline comments:
-- "line" must be the line number in the NEW file (after changes), not the diff line number
-- Only include actionable feedback
-- Keep comments concise (1-2 sentences)
-- Focus on: convention violations, bugs, security issues, performance problems
-- severity: "critical" = must fix, "warning" = should fix, "suggestion" = nice to have
+          Rules for inline comments:
+          - "line" must be the line number in the NEW file (after changes), not the diff line number
+          - Only include actionable feedback
+          - Keep comments concise (1-2 sentences)
+          - Focus on: convention violations, bugs, security issues, performance problems
+          - severity: "critical" = must fix, "warning" = should fix, "suggestion" = nice to have
 
-### PART 2: Summary
-After the JSON, provide a brief overall summary:
-- Overall assessment (1-2 sentences)
-- What's done well
-- Key recommendations
+          ### PART 2: Summary
+          After the JSON, provide a brief overall summary:
+          - Overall assessment (1-2 sentences)
+          - What's done well
+          - Key recommendations
 
-IMPORTANT: Start your response with the JSON array, then add the summary after.`;
+          IMPORTANT: Start your response with the JSON array, then add the summary after.`;
 
           const requestBody = JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
@@ -183,53 +176,57 @@ IMPORTANT: Start your response with the JSON array, then add the summary after.`
             res.on('end', () => {
               try {
                 const json = JSON.parse(data);
-                if (json.candidates?.[0]?.content?.parts?.[0]?.text) {
+                if (json.candidates && json.candidates[0] && json.candidates[0].content) {
                   fs.writeFileSync('review_output.txt', json.candidates[0].content.parts[0].text);
                   console.log('Review generated successfully');
                 } else if (json.error) {
-                  fs.writeFileSync('review_output.txt', `API Error: ${json.error.message}`);
+                  fs.writeFileSync('review_output.txt', 'API Error: ' + json.error.message);
                   console.error('API Error:', json.error.message);
                 } else {
                   fs.writeFileSync('review_output.txt', 'Unexpected response format from Gemini API');
                   console.error('Unexpected response:', data);
                 }
               } catch (e) {
-                fs.writeFileSync('review_output.txt', `Parse error: ${e.message}`);
+                fs.writeFileSync('review_output.txt', 'Parse error: ' + e.message);
                 console.error('Parse error:', e.message);
               }
             });
           });
 
           req.on('error', (e) => {
-            fs.writeFileSync('review_output.txt', `Request error: ${e.message}`);
+            fs.writeFileSync('review_output.txt', 'Request error: ' + e.message);
             console.error('Request error:', e.message);
           });
 
           req.write(requestBody);
           req.end();
-          NODE_EOF
+          SCRIPT_EOF
+
+      - name: Run Gemini PR Review
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GEMINI_MODEL: ${{ inputs.model }}
+        run: node review_script.js
 
       - name: Post review with inline comments
         uses: actions/github-script@v7
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const fs = require('fs');
             const reviewOutput = fs.readFileSync('review_output.txt', 'utf8');
 
-            // Parse inline comments from JSON
             let inlineComments = [];
             let summary = reviewOutput;
 
             try {
-              // Extract JSON array from response
               const jsonMatch = reviewOutput.match(/```json\n?([\s\S]*?)\n?```/);
               if (jsonMatch) {
                 inlineComments = JSON.parse(jsonMatch[1]);
                 summary = reviewOutput.replace(/```json\n?[\s\S]*?\n?```/, '').trim();
               } else {
-                // Try to find JSON array directly
                 const arrayMatch = reviewOutput.match(/\[\s*\{[\s\S]*?\}\s*\]/);
                 if (arrayMatch) {
                   inlineComments = JSON.parse(arrayMatch[0]);
@@ -240,20 +237,17 @@ IMPORTANT: Start your response with the JSON array, then add the summary after.`
               console.log('Could not parse inline comments:', e.message);
             }
 
-            // Get the PR diff to map file positions
             const { data: files } = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number
             });
 
-            // Create a map of file patches for line position calculation
             const filePatches = {};
             for (const file of files) {
               filePatches[file.filename] = file.patch || '';
             }
 
-            // Function to find position in diff for a given line
             function findDiffPosition(filename, targetLine) {
               const patch = filePatches[filename];
               if (!patch) return null;
@@ -264,20 +258,14 @@ IMPORTANT: Start your response with the JSON array, then add the summary after.`
 
               for (const line of lines) {
                 position++;
-
-                // Parse hunk header: @@ -start,count +start,count @@
                 const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
                 if (hunkMatch) {
                   currentLine = parseInt(hunkMatch[1]) - 1;
                   continue;
                 }
-
-                // Skip removed lines (they don't exist in new file)
                 if (line.startsWith('-')) {
                   continue;
                 }
-
-                // Count added and context lines
                 if (line.startsWith('+') || !line.startsWith('-')) {
                   currentLine++;
                   if (currentLine === targetLine) {
@@ -288,13 +276,8 @@ IMPORTANT: Start your response with the JSON array, then add the summary after.`
               return null;
             }
 
-            // Build review comments array
             const reviewComments = [];
-            const severityEmoji = {
-              critical: '🔴',
-              warning: '🟠',
-              suggestion: '🟡'
-            };
+            const severityEmoji = { critical: '🔴', warning: '🟠', suggestion: '🟡' };
 
             for (const comment of inlineComments) {
               const position = findDiffPosition(comment.file, comment.line);
@@ -303,26 +286,23 @@ IMPORTANT: Start your response with the JSON array, then add the summary after.`
                 reviewComments.push({
                   path: comment.file,
                   position: position,
-                  body: `${emoji} **${comment.severity?.toUpperCase() || 'COMMENT'}**\n\n${comment.comment}`
+                  body: `${emoji} **${(comment.severity || 'comment').toUpperCase()}**\n\n${comment.comment}`
                 });
               }
             }
 
-            // Determine review event based on issues found
             const hasCritical = inlineComments.some(c => c.severity === 'critical');
             const reviewEvent = hasCritical ? 'REQUEST_CHANGES' : 'COMMENT';
 
-            // Create the review with inline comments
             const summaryBody = `## 🤖 AI Code Review
 
-${summary}
+            ${summary}
 
----
-*Automated review powered by Gemini AI • ${reviewComments.length} inline comments added*`;
+            ---
+            *Automated review powered by Gemini AI • ${reviewComments.length} inline comments added*`;
 
             try {
               if (reviewComments.length > 0) {
-                // Submit as a proper PR review with inline comments
                 await github.rest.pulls.createReview({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -331,9 +311,8 @@ ${summary}
                   event: reviewEvent,
                   comments: reviewComments
                 });
-                console.log(`Created review with ${reviewComments.length} inline comments`);
+                console.log('Created review with ' + reviewComments.length + ' inline comments');
               } else {
-                // No inline comments, just post summary
                 await github.rest.pulls.createReview({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -345,7 +324,6 @@ ${summary}
               }
             } catch (error) {
               console.error('Error creating review:', error.message);
-              // Fallback to regular comment
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
