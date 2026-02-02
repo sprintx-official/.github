@@ -99,89 +99,63 @@ jobs:
 
           const prompt = `You are an expert code reviewer. Review the following PR diff against the project standards and conventions.
 
-          ## Project Standards
+## Project Standards
 
-          ${project}
+${project}
 
-          ## Coding Conventions
+## Coding Conventions
 
-          ${conventions}
+${conventions}
 
-          ## PR Information
+## PR Information
 
-          **Title:** ${prTitle}
-          **Description:** ${prBody}
+**Title:** ${prTitle}
+**Description:** ${prBody}
 
-          ## Changed Files
+## Changed Files
 
-          ${changedFiles}
+${changedFiles}
 
-          ## Code Diff
+## Code Diff
 
-          \`\`\`diff
-          ${diff}
-          \`\`\`
+\`\`\`diff
+${diff}
+\`\`\`
 
-          ## Review Instructions
+## Review Instructions
 
-          Provide a thorough code review covering:
+Analyze the code and provide your review in TWO parts:
 
-          ### 1. Convention Compliance
-          - File naming conventions
-          - Component/function naming conventions
-          - Import organization
-          - Code style rules from conventions
+### PART 1: Inline Comments (JSON)
+Return a JSON array of inline comments for specific lines. Each comment should target a specific line in the diff.
+IMPORTANT: Only comment on lines that were ADDED (lines starting with +) in the diff.
 
-          ### 2. Code Quality
-          - Clean, readable code
-          - Proper error handling
-          - DRY principles
-          - Single responsibility
-          - Proper typing (if TypeScript)
+Format:
+\`\`\`json
+[
+  {
+    "file": "path/to/file.tsx",
+    "line": 10,
+    "severity": "critical|warning|suggestion",
+    "comment": "Brief description of the issue and how to fix it"
+  }
+]
+\`\`\`
 
-          ### 3. Security
-          - No hardcoded secrets
-          - Input validation
-          - XSS prevention
-          - Injection prevention
+Rules for inline comments:
+- "line" must be the line number in the NEW file (after changes), not the diff line number
+- Only include actionable feedback
+- Keep comments concise (1-2 sentences)
+- Focus on: convention violations, bugs, security issues, performance problems
+- severity: "critical" = must fix, "warning" = should fix, "suggestion" = nice to have
 
-          ### 4. Performance
-          - Unnecessary re-renders (React)
-          - Heavy computations
-          - Missing optimizations
-          - Bundle size impact
+### PART 2: Summary
+After the JSON, provide a brief overall summary:
+- Overall assessment (1-2 sentences)
+- What's done well
+- Key recommendations
 
-          ### 5. Best Practices
-          - Framework-specific patterns
-          - Proper use of hooks/lifecycle
-          - Accessibility concerns
-
-          ## Output Format
-
-          ### Summary
-          [Brief overall assessment - 1-2 sentences]
-
-          ### Issues Found
-          [List each issue with severity]
-
-          🔴 **Critical** - Must fix before merge
-          🟠 **Warning** - Should fix
-          🟡 **Suggestion** - Nice to have
-
-          Format:
-          **File:** \`filename\`
-          **Line:** X (if applicable)
-          **Severity:** [emoji]
-          **Issue:** Description
-          **Fix:** How to resolve
-
-          ### What's Good
-          [Positive feedback on well-written code]
-
-          ### Recommendations
-          [General improvements]
-
-          If no issues found, acknowledge the good work!`;
+IMPORTANT: Start your response with the JSON array, then add the summary after.`;
 
           const requestBody = JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
@@ -235,44 +209,147 @@ jobs:
           req.end();
           NODE_EOF
 
-      - name: Post review comment
+      - name: Post review with inline comments
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           script: |
             const fs = require('fs');
-            const review = fs.readFileSync('review_output.txt', 'utf8');
+            const reviewOutput = fs.readFileSync('review_output.txt', 'utf8');
 
-            const body = `## 🤖 AI Code Review
+            // Parse inline comments from JSON
+            let inlineComments = [];
+            let summary = reviewOutput;
 
-            ${review}
+            try {
+              // Extract JSON array from response
+              const jsonMatch = reviewOutput.match(/```json\n?([\s\S]*?)\n?```/);
+              if (jsonMatch) {
+                inlineComments = JSON.parse(jsonMatch[1]);
+                summary = reviewOutput.replace(/```json\n?[\s\S]*?\n?```/, '').trim();
+              } else {
+                // Try to find JSON array directly
+                const arrayMatch = reviewOutput.match(/\[\s*\{[\s\S]*?\}\s*\]/);
+                if (arrayMatch) {
+                  inlineComments = JSON.parse(arrayMatch[0]);
+                  summary = reviewOutput.replace(arrayMatch[0], '').trim();
+                }
+              }
+            } catch (e) {
+              console.log('Could not parse inline comments:', e.message);
+            }
 
-            ---
-            *Automated review powered by Gemini AI*
-            `;
-
-            const { data: comments } = await github.rest.issues.listComments({
+            // Get the PR diff to map file positions
+            const { data: files } = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number
+              pull_number: context.issue.number
             });
 
-            const botComment = comments.find(comment =>
-              comment.user.type === 'Bot' &&
-              comment.body.includes('🤖 AI Code Review')
-            );
+            // Create a map of file patches for line position calculation
+            const filePatches = {};
+            for (const file of files) {
+              filePatches[file.filename] = file.patch || '';
+            }
 
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: body
-              });
-            } else {
+            // Function to find position in diff for a given line
+            function findDiffPosition(filename, targetLine) {
+              const patch = filePatches[filename];
+              if (!patch) return null;
+
+              const lines = patch.split('\n');
+              let currentLine = 0;
+              let position = 0;
+
+              for (const line of lines) {
+                position++;
+
+                // Parse hunk header: @@ -start,count +start,count @@
+                const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+                if (hunkMatch) {
+                  currentLine = parseInt(hunkMatch[1]) - 1;
+                  continue;
+                }
+
+                // Skip removed lines (they don't exist in new file)
+                if (line.startsWith('-')) {
+                  continue;
+                }
+
+                // Count added and context lines
+                if (line.startsWith('+') || !line.startsWith('-')) {
+                  currentLine++;
+                  if (currentLine === targetLine) {
+                    return position;
+                  }
+                }
+              }
+              return null;
+            }
+
+            // Build review comments array
+            const reviewComments = [];
+            const severityEmoji = {
+              critical: '🔴',
+              warning: '🟠',
+              suggestion: '🟡'
+            };
+
+            for (const comment of inlineComments) {
+              const position = findDiffPosition(comment.file, comment.line);
+              if (position && filePatches[comment.file]) {
+                const emoji = severityEmoji[comment.severity] || '💬';
+                reviewComments.push({
+                  path: comment.file,
+                  position: position,
+                  body: `${emoji} **${comment.severity?.toUpperCase() || 'COMMENT'}**\n\n${comment.comment}`
+                });
+              }
+            }
+
+            // Determine review event based on issues found
+            const hasCritical = inlineComments.some(c => c.severity === 'critical');
+            const reviewEvent = hasCritical ? 'REQUEST_CHANGES' : 'COMMENT';
+
+            // Create the review with inline comments
+            const summaryBody = `## 🤖 AI Code Review
+
+${summary}
+
+---
+*Automated review powered by Gemini AI • ${reviewComments.length} inline comments added*`;
+
+            try {
+              if (reviewComments.length > 0) {
+                // Submit as a proper PR review with inline comments
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  body: summaryBody,
+                  event: reviewEvent,
+                  comments: reviewComments
+                });
+                console.log(`Created review with ${reviewComments.length} inline comments`);
+              } else {
+                // No inline comments, just post summary
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  body: summaryBody,
+                  event: 'COMMENT'
+                });
+                console.log('Created review without inline comments');
+              }
+            } catch (error) {
+              console.error('Error creating review:', error.message);
+              // Fallback to regular comment
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: body
+                body: summaryBody
               });
             }
