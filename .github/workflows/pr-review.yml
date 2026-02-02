@@ -28,7 +28,7 @@ on:
         description: 'Gemini model to use'
         required: false
         type: string
-        default: 'gemini-1.5-pro'
+        default: 'gemini-2.0-flash'
     secrets:
       GEMINI_API_KEY:
         required: true
@@ -95,7 +95,7 @@ jobs:
           const project = fs.readFileSync('project_content.txt', 'utf8');
           const prTitle = process.env.PR_TITLE || 'No title';
           const prBody = process.env.PR_BODY || 'No description';
-          const model = process.env.GEMINI_MODEL || 'gemini-1.5-pro';
+          const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
           const prompt = `You are an expert code reviewer. Review the following PR diff against the project standards and conventions.
 
