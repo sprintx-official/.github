@@ -19,11 +19,16 @@ on:
         required: false
         type: string
         default: '.planning/CONVENTIONS.md'
-      project_path:
+      project_standards_path:
         description: 'Path to project standards file'
         required: false
         type: string
         default: '.planning/PROJECT.md'
+      project_docs_path:
+        description: 'Path to project documentation (idea, features, requirements)'
+        required: false
+        type: string
+        default: 'docs/PROJECT.md'
       model:
         description: 'Gemini model to use'
         required: false
@@ -56,19 +61,27 @@ jobs:
           echo "Changed files:"
           cat changed_files.txt
 
-      - name: Read project conventions
-        id: conventions
+      - name: Read project files
         run: |
+          # Read conventions
           if [ -f "${{ inputs.conventions_path }}" ]; then
             cat "${{ inputs.conventions_path }}" > conventions_content.txt
           else
-            echo "No conventions file found at ${{ inputs.conventions_path }}" > conventions_content.txt
+            echo "No conventions file found" > conventions_content.txt
           fi
 
-          if [ -f "${{ inputs.project_path }}" ]; then
-            cat "${{ inputs.project_path }}" > project_content.txt
+          # Read project standards
+          if [ -f "${{ inputs.project_standards_path }}" ]; then
+            cat "${{ inputs.project_standards_path }}" > standards_content.txt
           else
-            echo "No project file found at ${{ inputs.project_path }}" > project_content.txt
+            echo "No project standards file found" > standards_content.txt
+          fi
+
+          # Read project documentation (idea, features, requirements)
+          if [ -f "${{ inputs.project_docs_path }}" ]; then
+            cat "${{ inputs.project_docs_path }}" > project_docs_content.txt
+          else
+            echo "No project documentation file found" > project_docs_content.txt
           fi
 
       - name: Setup Node.js
@@ -82,21 +95,29 @@ jobs:
           const fs = require('fs');
           const https = require('https');
 
-          const diff = fs.readFileSync('pr_diff.txt', 'utf8').slice(0, 30000);
+          const diff = fs.readFileSync('pr_diff.txt', 'utf8').slice(0, 25000);
           const changedFiles = fs.readFileSync('changed_files.txt', 'utf8');
           const conventions = fs.readFileSync('conventions_content.txt', 'utf8');
-          const project = fs.readFileSync('project_content.txt', 'utf8');
+          const standards = fs.readFileSync('standards_content.txt', 'utf8');
+          const projectDocs = fs.readFileSync('project_docs_content.txt', 'utf8');
           const prTitle = process.env.PR_TITLE || 'No title';
           const prBody = process.env.PR_BODY || 'No description';
           const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
-          const prompt = `You are an expert code reviewer. Review the following PR diff against the project standards and conventions.
+          const prompt = `You are an expert code reviewer and senior developer. Review the following PR with deep understanding of the project.
 
-          ## Project Standards
+          ## Project Overview & Requirements
+          This section describes what the project is about, its features, and requirements. Use this to understand if the PR aligns with the project goals.
 
-          ${project}
+          ${projectDocs}
+
+          ## Project Technical Standards
+          Technical architecture, tech stack, and coding standards.
+
+          ${standards}
 
           ## Coding Conventions
+          Specific rules and conventions that must be followed.
 
           ${conventions}
 
@@ -117,13 +138,50 @@ jobs:
 
           ## Review Instructions
 
-          Analyze the code and provide your review in TWO parts:
+          As a senior developer reviewing this PR, check:
+
+          ### 1. Project Alignment
+          - Does this PR align with the project's goals and requirements?
+          - Is this the right approach for the feature/fix?
+          - Are there any missing pieces that should be included?
+
+          ### 2. Convention Compliance
+          - File naming conventions
+          - Component/function naming conventions
+          - Import organization
+          - Code style rules from conventions
+
+          ### 3. Code Quality
+          - Clean, readable code
+          - Proper error handling
+          - DRY principles
+          - Single responsibility
+          - Proper typing (if TypeScript)
+
+          ### 4. Security
+          - No hardcoded secrets
+          - Input validation
+          - XSS prevention
+          - Injection prevention
+
+          ### 5. Performance
+          - Unnecessary re-renders (React)
+          - Heavy computations
+          - Missing optimizations
+          - Bundle size impact
+
+          ### 6. Best Practices
+          - Framework-specific patterns
+          - Proper use of hooks/lifecycle
+          - Accessibility concerns
+
+          ## Output Format
+
+          Provide your review in TWO parts:
 
           ### PART 1: Inline Comments (JSON)
-          Return a JSON array of inline comments for specific lines. Each comment should target a specific line in the diff.
-          IMPORTANT: Only comment on lines that were ADDED (lines starting with +) in the diff.
+          Return a JSON array of inline comments for specific lines.
 
-          Format:
           \`\`\`json
           [
             {
@@ -135,18 +193,18 @@ jobs:
           ]
           \`\`\`
 
-          Rules for inline comments:
-          - "line" must be the line number in the NEW file (after changes), not the diff line number
-          - Only include actionable feedback
+          Rules:
+          - "line" = line number in the NEW file (not diff line number)
+          - Only comment on ADDED lines (lines starting with +)
           - Keep comments concise (1-2 sentences)
-          - Focus on: convention violations, bugs, security issues, performance problems
           - severity: "critical" = must fix, "warning" = should fix, "suggestion" = nice to have
 
           ### PART 2: Summary
-          After the JSON, provide a brief overall summary:
-          - Overall assessment (1-2 sentences)
-          - What's done well
-          - Key recommendations
+          After the JSON, provide:
+          - **Overall Assessment**: 1-2 sentences on the PR quality
+          - **Project Alignment**: Does this fit the project goals?
+          - **What's Good**: Positive feedback
+          - **Key Recommendations**: Most important improvements
 
           IMPORTANT: Start your response with the JSON array, then add the summary after.`;
 
