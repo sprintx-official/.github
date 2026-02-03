@@ -1,6 +1,9 @@
 # =============================================================================
-# ORGANIZATION REUSABLE WORKFLOW - AI PR Review
+# ORGANIZATION REUSABLE WORKFLOW - AI PR Review (Senior Developer Level)
 # =============================================================================
+# Intelligent code review that understands your project context, detects
+# code reuse opportunities, and reviews like a senior developer would.
+#
 # Individual repos can call this workflow with just a few lines:
 #
 # jobs:
@@ -34,6 +37,16 @@ on:
         required: false
         type: string
         default: 'gemini-2.0-flash'
+      max_diff_size:
+        description: 'Maximum diff size to send to AI (in characters)'
+        required: false
+        type: number
+        default: 50000
+      scan_patterns:
+        description: 'JSON array of glob patterns to scan for existing code (e.g., ["src/components/**/*.tsx", "src/utils/**/*.ts"])'
+        required: false
+        type: string
+        default: '["src/components/**/*", "src/lib/**/*", "src/utils/**/*", "src/helpers/**/*", "src/hooks/**/*", "src/constants/**/*", "src/shared/**/*", "lib/**/*", "utils/**/*", "common/**/*"]'
     secrets:
       GEMINI_API_KEY:
         required: true
@@ -84,6 +97,71 @@ jobs:
             echo "No project documentation file found" > project_docs_content.txt
           fi
 
+      - name: Scan existing codebase for reusable patterns
+        run: |
+          echo "=== EXISTING CODEBASE ANALYSIS ===" > codebase_context.txt
+          echo "" >> codebase_context.txt
+
+          # Parse scan patterns from input
+          PATTERNS='${{ inputs.scan_patterns }}'
+
+          # Find and list all existing components, utils, helpers, hooks, constants
+          echo "### Existing Reusable Code Files ###" >> codebase_context.txt
+          echo "These are files that contain potentially reusable code. Check if the PR duplicates any of these." >> codebase_context.txt
+          echo "" >> codebase_context.txt
+
+          # Find files matching patterns and extract their exports/definitions
+          for pattern in $(echo "$PATTERNS" | jq -r '.[]' 2>/dev/null || echo "src/components src/utils src/lib src/helpers src/hooks src/constants"); do
+            if ls $pattern 2>/dev/null | head -1 > /dev/null; then
+              echo "#### Pattern: $pattern ####" >> codebase_context.txt
+              find . -path "./$pattern" -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \) 2>/dev/null | head -100 | while read file; do
+                if [ -f "$file" ]; then
+                  echo "" >> codebase_context.txt
+                  echo "**File: $file**" >> codebase_context.txt
+                  # Extract exports, function names, component names, constants
+                  grep -E "^export (const|function|class|interface|type|enum|default)" "$file" 2>/dev/null | head -20 >> codebase_context.txt || true
+                  grep -E "^(const|let|var) [A-Z][A-Z_]+ =" "$file" 2>/dev/null | head -10 >> codebase_context.txt || true
+                fi
+              done
+              echo "" >> codebase_context.txt
+            fi
+          done
+
+          # Analyze common patterns in the codebase
+          echo "" >> codebase_context.txt
+          echo "### Common Patterns Detected ###" >> codebase_context.txt
+
+          # Find commonly used custom hooks
+          echo "" >> codebase_context.txt
+          echo "#### Custom Hooks Available ####" >> codebase_context.txt
+          find . -type f -name "use*.ts" -o -name "use*.tsx" 2>/dev/null | grep -v node_modules | grep -v ".next" | head -30 >> codebase_context.txt || echo "None found" >> codebase_context.txt
+
+          # Find utility functions
+          echo "" >> codebase_context.txt
+          echo "#### Utility Files ####" >> codebase_context.txt
+          find . -type f \( -path "*/utils/*" -o -path "*/helpers/*" -o -path "*/lib/*" \) \( -name "*.ts" -o -name "*.js" \) 2>/dev/null | grep -v node_modules | grep -v ".next" | head -30 >> codebase_context.txt || echo "None found" >> codebase_context.txt
+
+          # Find constants files
+          echo "" >> codebase_context.txt
+          echo "#### Constants Files ####" >> codebase_context.txt
+          find . -type f \( -path "*/constants/*" -o -name "constants.ts" -o -name "constants.js" -o -name "config.ts" -o -name "config.js" \) 2>/dev/null | grep -v node_modules | grep -v ".next" | head -20 >> codebase_context.txt || echo "None found" >> codebase_context.txt
+
+          # Find shared/common components
+          echo "" >> codebase_context.txt
+          echo "#### Shared/Common Components ####" >> codebase_context.txt
+          find . -type f \( -path "*/components/common/*" -o -path "*/components/shared/*" -o -path "*/components/ui/*" \) \( -name "*.tsx" -o -name "*.jsx" \) 2>/dev/null | grep -v node_modules | grep -v ".next" | head -30 >> codebase_context.txt || echo "None found" >> codebase_context.txt
+
+          # Truncate if too large
+          if [ $(wc -c < codebase_context.txt) -gt 30000 ]; then
+            head -c 30000 codebase_context.txt > codebase_context_truncated.txt
+            mv codebase_context_truncated.txt codebase_context.txt
+            echo "" >> codebase_context.txt
+            echo "... (truncated for size)" >> codebase_context.txt
+          fi
+
+          echo "Codebase context generated successfully"
+          cat codebase_context.txt
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -95,92 +173,138 @@ jobs:
           const fs = require('fs');
           const https = require('https');
 
-          const diff = fs.readFileSync('pr_diff.txt', 'utf8').slice(0, 25000);
+          const maxDiffSize = parseInt(process.env.MAX_DIFF_SIZE || '50000');
+          const diff = fs.readFileSync('pr_diff.txt', 'utf8').slice(0, maxDiffSize);
           const changedFiles = fs.readFileSync('changed_files.txt', 'utf8');
           const conventions = fs.readFileSync('conventions_content.txt', 'utf8');
           const standards = fs.readFileSync('standards_content.txt', 'utf8');
           const projectDocs = fs.readFileSync('project_docs_content.txt', 'utf8');
+          const codebaseContext = fs.readFileSync('codebase_context.txt', 'utf8');
           const prTitle = process.env.PR_TITLE || 'No title';
           const prBody = process.env.PR_BODY || 'No description';
           const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
-          const prompt = `You are an expert code reviewer and senior developer. Review the following PR with deep understanding of the project.
+          const prompt = `You are a SENIOR STAFF ENGINEER conducting a thorough code review. You have deep expertise in software architecture, design patterns, and have seen many codebases evolve over years. You understand the long-term implications of code decisions.
+
+          Your review philosophy:
+          - Code should be written for the NEXT developer to read, not just to work
+          - Every line of code is a liability - less code is better
+          - Duplication is cheaper than the wrong abstraction, but obvious duplication should be avoided
+          - Think about what happens when this code needs to change in 6 months
+          - Consider: "Would I be comfortable if this ran in production at 3 AM and I had to debug it?"
+
+          ---
+
+          # PROJECT CONTEXT
 
           ## Project Overview & Requirements
-          This section describes what the project is about, its features, and requirements. Use this to understand if the PR aligns with the project goals.
+          Read this carefully to understand what this project is trying to achieve. The PR should align with these goals.
 
           ${projectDocs}
 
-          ## Project Technical Standards
-          Technical architecture, tech stack, and coding standards.
+          ## Technical Standards & Architecture
+          The technical decisions and patterns established for this project.
 
           ${standards}
 
           ## Coding Conventions
-          Specific rules and conventions that must be followed.
+          The rules the team has agreed to follow.
 
           ${conventions}
 
-          ## PR Information
+          ---
+
+          # EXISTING CODEBASE ANALYSIS
+
+          CRITICAL: Review this section carefully. The developer may have created something that ALREADY EXISTS in the codebase. This is one of the most common issues in PRs.
+
+          ${codebaseContext}
+
+          ---
+
+          # PULL REQUEST DETAILS
 
           **Title:** ${prTitle}
           **Description:** ${prBody}
 
           ## Changed Files
-
           ${changedFiles}
 
           ## Code Diff
-
           \`\`\`diff
           ${diff}
           \`\`\`
 
-          ## Review Instructions
+          ---
 
-          As a senior developer reviewing this PR, check:
+          # SENIOR DEVELOPER REVIEW CHECKLIST
 
-          ### 1. Project Alignment
-          - Does this PR align with the project's goals and requirements?
-          - Is this the right approach for the feature/fix?
+          ## 1. 🔄 CODE REUSE & DUPLICATION (HIGHEST PRIORITY)
+          This is where junior/mid developers make the most mistakes. Check carefully:
+
+          - **Existing utilities ignored**: Is the developer writing code that already exists in utils/, helpers/, or lib/?
+          - **Existing components ignored**: Are they creating a new component when a similar one exists in components/common/ or components/shared/?
+          - **Existing hooks ignored**: Are they reimplementing logic that an existing custom hook provides?
+          - **Existing constants ignored**: Are they hardcoding values that should come from constants/?
+          - **Copy-paste code**: Is there code that looks copy-pasted from another file without proper abstraction?
+          - **New common logic not extracted**: Is the developer adding code that SHOULD be a shared utility/component but isn't?
+
+          Ask yourself: "Have I seen this pattern elsewhere in this codebase? Should this be shared?"
+
+          ## 2. 🏗️ ARCHITECTURAL CONCERNS
+          Think about the long-term health of the codebase:
+
+          - **Coupling**: Is this code tightly coupled to things it shouldn't be?
+          - **Wrong layer**: Is business logic in UI components? Is UI logic in services?
+          - **Scalability**: Will this approach work when we have 10x more data/users?
+          - **Testability**: Can this code be unit tested? Is it structured for testing?
+          - **State management**: Is state being managed at the right level?
+          - **Data flow**: Is the data flow clear and predictable?
+
+          ## 3. ⚠️ FUTURE PROBLEMS (Things that will bite us later)
+
+          - **Magic numbers/strings**: Are there hardcoded values that should be constants?
+          - **Implicit dependencies**: Does this code rely on things that aren't explicit?
+          - **Fragile patterns**: Will this break if we change something seemingly unrelated?
+          - **Missing error states**: What happens when this fails? Is failure handled gracefully?
+          - **Edge cases**: Are edge cases handled? Empty arrays, null values, network failures?
+          - **Race conditions**: In async code, are there potential race conditions?
+          - **Memory leaks**: Are event listeners cleaned up? Are subscriptions unsubscribed?
+
+          ## 4. 📖 CODE QUALITY & READABILITY
+
+          - **Naming**: Do names clearly describe what things do? Would you understand this in 6 months?
+          - **Complexity**: Is there unnecessary complexity? Could this be simpler?
+          - **Comments**: Are complex parts explained? Are there misleading comments?
+          - **Function length**: Are functions doing too much? Should they be split?
+          - **Type safety**: Are types properly defined? Any 'any' types that should be specific?
+
+          ## 5. 🔒 SECURITY
+
+          - **Injection risks**: SQL injection, XSS, command injection
+          - **Authentication/Authorization**: Is access properly controlled?
+          - **Sensitive data**: Are secrets, tokens, or PII properly handled?
+          - **Input validation**: Is user input validated before use?
+
+          ## 6. ⚡ PERFORMANCE
+
+          - **Unnecessary work**: Are there computations that could be avoided or memoized?
+          - **Re-renders**: In React, are there unnecessary re-renders?
+          - **Bundle size**: Are large dependencies being imported unnecessarily?
+          - **Database/API**: Are there N+1 queries or excessive API calls?
+
+          ## 7. ✅ PROJECT ALIGNMENT
+
+          - Does this PR actually solve the problem it claims to solve?
+          - Is this the right approach given the project's goals?
           - Are there any missing pieces that should be included?
 
-          ### 2. Convention Compliance
-          - File naming conventions
-          - Component/function naming conventions
-          - Import organization
-          - Code style rules from conventions
+          ---
 
-          ### 3. Code Quality
-          - Clean, readable code
-          - Proper error handling
-          - DRY principles
-          - Single responsibility
-          - Proper typing (if TypeScript)
+          # OUTPUT FORMAT
 
-          ### 4. Security
-          - No hardcoded secrets
-          - Input validation
-          - XSS prevention
-          - Injection prevention
-
-          ### 5. Performance
-          - Unnecessary re-renders (React)
-          - Heavy computations
-          - Missing optimizations
-          - Bundle size impact
-
-          ### 6. Best Practices
-          - Framework-specific patterns
-          - Proper use of hooks/lifecycle
-          - Accessibility concerns
-
-          ## Output Format
-
-          Provide your review in TWO parts:
-
-          ### PART 1: Inline Comments (JSON)
-          Return a JSON array of inline comments for specific lines.
+          ## PART 1: Inline Comments (JSON)
+          Provide a JSON array of specific, actionable comments:
 
           \`\`\`json
           [
@@ -188,25 +312,51 @@ jobs:
               "file": "path/to/file.tsx",
               "line": 10,
               "severity": "critical|warning|suggestion",
-              "comment": "Brief description of the issue and how to fix it"
+              "category": "reuse|architecture|future-problem|quality|security|performance|alignment",
+              "comment": "Specific issue and how to fix it. If suggesting to use existing code, mention the specific file/function."
             }
           ]
           \`\`\`
 
-          Rules:
-          - "line" = line number in the NEW file (not diff line number)
+          **Severity Guide:**
+          - **critical**: Must fix before merge. Security issues, bugs, or code that will definitely cause problems.
+          - **warning**: Should fix. Code smells, missing patterns, or things that will likely cause issues.
+          - **suggestion**: Nice to have. Improvements that would make the code better but aren't blocking.
+
+          **Category Guide:**
+          - **reuse**: Could use existing code, or should extract to shared location
+          - **architecture**: Design or structural issues
+          - **future-problem**: Will cause problems later
+          - **quality**: Readability, naming, complexity
+          - **security**: Security vulnerabilities
+          - **performance**: Performance issues
+          - **alignment**: Doesn't match project goals
+
+          **Rules:**
+          - "line" = line number in the NEW file (from the + lines in diff)
           - Only comment on ADDED lines (lines starting with +)
-          - Keep comments concise (1-2 sentences)
-          - severity: "critical" = must fix, "warning" = should fix, "suggestion" = nice to have
+          - Be specific: Instead of "use a constant", say "This should use API_BASE_URL from src/constants/api.ts"
+          - Focus on the most important issues first
 
-          ### PART 2: Summary
-          After the JSON, provide:
-          - **Overall Assessment**: 1-2 sentences on the PR quality
-          - **Project Alignment**: Does this fit the project goals?
-          - **What's Good**: Positive feedback
-          - **Key Recommendations**: Most important improvements
+          ## PART 2: Summary
+          After the JSON, provide a brief summary:
 
-          IMPORTANT: Start your response with the JSON array, then add the summary after.`;
+          ### Overall Assessment
+          One line: Is this PR ready to merge, needs minor fixes, or needs significant work?
+
+          ### Code Reuse Analysis
+          Did the developer reuse existing code appropriately? Did they miss opportunities to use existing utilities/components?
+
+          ### Architectural Impact
+          Does this PR maintain or improve the codebase architecture? Any concerns?
+
+          ### What's Done Well
+          Genuine positives (not empty praise)
+
+          ### Key Action Items
+          The 2-3 most important things to address before merging
+
+          IMPORTANT: Start with the JSON array, then the summary. Be direct and specific - vague feedback is useless.`;
 
           const requestBody = JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
@@ -267,6 +417,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GEMINI_MODEL: ${{ inputs.model }}
+          MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
         run: node review_script.js
 
       - name: Post review with inline comments
@@ -336,28 +487,69 @@ jobs:
 
             const reviewComments = [];
             const severityEmoji = { critical: '🔴', warning: '🟠', suggestion: '🟡' };
+            const categoryEmoji = {
+              'reuse': '♻️',
+              'architecture': '🏗️',
+              'future-problem': '⚠️',
+              'quality': '📖',
+              'security': '🔒',
+              'performance': '⚡',
+              'alignment': '🎯'
+            };
+            const categoryLabel = {
+              'reuse': 'Code Reuse',
+              'architecture': 'Architecture',
+              'future-problem': 'Future Problem',
+              'quality': 'Code Quality',
+              'security': 'Security',
+              'performance': 'Performance',
+              'alignment': 'Project Alignment'
+            };
 
             for (const comment of inlineComments) {
               const position = findDiffPosition(comment.file, comment.line);
               if (position && filePatches[comment.file]) {
-                const emoji = severityEmoji[comment.severity] || '💬';
+                const sevEmoji = severityEmoji[comment.severity] || '💬';
+                const catEmoji = categoryEmoji[comment.category] || '';
+                const catLabel = categoryLabel[comment.category] || '';
+                const categoryTag = catLabel ? ` \`${catLabel}\`` : '';
+
                 reviewComments.push({
                   path: comment.file,
                   position: position,
-                  body: `${emoji} **${(comment.severity || 'comment').toUpperCase()}**\n\n${comment.comment}`
+                  body: `${sevEmoji} **${(comment.severity || 'comment').toUpperCase()}**${categoryTag}\n\n${catEmoji} ${comment.comment}`
                 });
               }
             }
 
+            // Count issues by category for summary
+            const categoryCounts = {};
+            for (const comment of inlineComments) {
+              const cat = comment.category || 'other';
+              categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+            }
+
             const hasCritical = inlineComments.some(c => c.severity === 'critical');
+            const hasWarning = inlineComments.some(c => c.severity === 'warning');
             const reviewEvent = hasCritical ? 'REQUEST_CHANGES' : 'COMMENT';
 
-            const summaryBody = `## 🤖 AI Code Review
+            // Build category breakdown
+            let categoryBreakdown = '';
+            if (Object.keys(categoryCounts).length > 0) {
+              categoryBreakdown = '\n\n**Issues by Category:**\n';
+              for (const [cat, count] of Object.entries(categoryCounts)) {
+                const emoji = categoryEmoji[cat] || '📝';
+                const label = categoryLabel[cat] || cat;
+                categoryBreakdown += `- ${emoji} ${label}: ${count}\n`;
+              }
+            }
 
-            ${summary}
+            const summaryBody = `## 🤖 Senior Developer AI Review
 
-            ---
-            *Automated review powered by Gemini AI • ${reviewComments.length} inline comments added*`;
+${summary}
+${categoryBreakdown}
+---
+*Reviewed as a senior developer by Gemini AI • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
 
             try {
               if (reviewComments.length > 0) {
