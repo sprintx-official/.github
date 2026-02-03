@@ -544,12 +544,7 @@ jobs:
               }
             }
 
-            const summaryBody = `## 🤖 Senior Developer AI Review
-
-${summary}
-${categoryBreakdown}
----
-*Reviewed as a senior developer by Gemini AI • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
+            const summaryBody = `## 🤖 Senior Developer AI Review\n\n${summary}\n${categoryBreakdown}\n---\n*Reviewed as a senior developer by Gemini AI • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
 
             try {
               if (reviewComments.length > 0) {
