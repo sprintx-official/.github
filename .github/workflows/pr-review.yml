@@ -47,9 +47,16 @@ on:
         required: false
         type: string
         default: '["src/components/**/*", "src/lib/**/*", "src/utils/**/*", "src/helpers/**/*", "src/hooks/**/*", "src/constants/**/*", "src/shared/**/*", "lib/**/*", "utils/**/*", "common/**/*"]'
+      dev_profiles_repo:
+        description: 'Private repo for developer profiles (org/repo format)'
+        required: false
+        type: string
+        default: 'sprintx-official/dev-profiles'
     secrets:
       GEMINI_API_KEY:
         required: true
+      DEV_PROFILES_PAT:
+        required: false
 
 permissions:
   contents: read
@@ -65,6 +72,54 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Checkout developer profiles
+        if: ${{ secrets.DEV_PROFILES_PAT != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.dev_profiles_repo }}
+          token: ${{ secrets.DEV_PROFILES_PAT }}
+          path: dev-profiles
+          persist-credentials: false
+        continue-on-error: true
+
+      - name: Read developer profile
+        id: dev-profile
+        run: |
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          echo "author=${AUTHOR}" >> $GITHUB_OUTPUT
+          echo "repo=${REPO_NAME}" >> $GITHUB_OUTPUT
+
+          PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
+          if [ -f "$PROFILE_PATH" ]; then
+            echo "Found existing profile for ${AUTHOR}"
+            cat "$PROFILE_PATH" > dev_profile.txt
+          else
+            echo "Creating new profile template for ${AUTHOR}"
+            cat > dev_profile.txt << EOF
+          # Developer Profile: ${AUTHOR}
+
+          ## Stats
+          - **Total PRs Reviewed:** 0
+          - **Last Review:** Never
+          - **Repositories:** None yet
+
+          ## Strengths
+          (To be discovered through code reviews)
+
+          ## Areas for Improvement
+          (To be discovered through code reviews)
+
+          ## Recent Feedback History
+          | Date | Repo | Category | Issue Summary |
+          |------|------|----------|---------------|
+
+          ## AI Learning Notes
+          <!-- Patterns the AI has observed -->
+          - New developer, building profile...
+          EOF
+          fi
 
       - name: Get PR diff
         id: diff
@@ -180,9 +235,13 @@ jobs:
           const standards = fs.readFileSync('standards_content.txt', 'utf8');
           const projectDocs = fs.readFileSync('project_docs_content.txt', 'utf8');
           const codebaseContext = fs.readFileSync('codebase_context.txt', 'utf8');
+          const developerProfile = fs.existsSync('dev_profile.txt') ? fs.readFileSync('dev_profile.txt', 'utf8') : 'No developer profile available';
           const prTitle = process.env.PR_TITLE || 'No title';
           const prBody = process.env.PR_BODY || 'No description';
+          const prAuthor = process.env.PR_AUTHOR || 'unknown';
+          const repoName = process.env.REPO_NAME || 'unknown';
           const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+          const today = new Date().toISOString().split('T')[0];
 
           const prompt = `You are a SENIOR STAFF ENGINEER conducting a thorough code review. You have deep expertise in software architecture, design patterns, and have seen many codebases evolve over years. You understand the long-term implications of code decisions.
 
@@ -222,8 +281,23 @@ jobs:
 
           ---
 
+          # DEVELOPER PROFILE (LEARNING CONTEXT)
+
+          This is the historical profile for the PR author: **${prAuthor}**
+
+          Use this profile to:
+          1. Check if they're repeating past mistakes - be direct about patterns
+          2. Acknowledge improvements if they've fixed previously flagged issues
+          3. Tailor feedback to patterns you've observed about this developer
+
+          ${developerProfile}
+
+          ---
+
           # PULL REQUEST DETAILS
 
+          **Author:** ${prAuthor}
+          **Repository:** ${repoName}
           **Title:** ${prTitle}
           **Description:** ${prBody}
 
@@ -344,6 +418,12 @@ jobs:
           ### Overall Assessment
           One line: Is this PR ready to merge, needs minor fixes, or needs significant work?
 
+          ### Developer Pattern Recognition
+          Based on their profile, note if they:
+          - Repeated a previously flagged mistake (call it out directly)
+          - Improved on a previous issue (acknowledge the growth)
+          - Showed a new pattern worth tracking
+
           ### Code Reuse Analysis
           Did the developer reuse existing code appropriately? Did they miss opportunities to use existing utilities/components?
 
@@ -356,7 +436,36 @@ jobs:
           ### Key Action Items
           The 2-3 most important things to address before merging
 
-          IMPORTANT: Start with the JSON array, then the summary. Be direct and specific - vague feedback is useless.`;
+          ---
+
+          ## PART 3: Updated Developer Profile
+          Output an updated profile for this developer. This will be saved and used for future reviews.
+
+          \`\`\`developer-profile
+          # Developer Profile: ${prAuthor}
+
+          ## Stats
+          - **Total PRs Reviewed:** [INCREMENT from previous or start at 1]
+          - **Last Review:** ${today}
+          - **Repositories:** [ADD ${repoName} if not already listed]
+
+          ## Strengths
+          [List 3-5 positive patterns observed across all reviews]
+
+          ## Areas for Improvement
+          [List issues with frequency count, e.g., "- [ ] Code reuse (seen 3x) - Description"]
+
+          ## Recent Feedback History
+          | Date | Repo | Category | Issue Summary |
+          |------|------|----------|---------------|
+          | ${today} | ${repoName} | [category] | [brief issue from this PR] |
+          [Keep last 10 entries from previous profile]
+
+          ## AI Learning Notes
+          [Observations about this developer's patterns, coding style, what feedback works best]
+          \`\`\`
+
+          IMPORTANT: Output order must be: 1) JSON comments, 2) Summary, 3) Developer profile. Be direct and specific - vague feedback is useless.`;
 
           const requestBody = JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
@@ -416,6 +525,8 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ steps.dev-profile.outputs.author }}
+          REPO_NAME: ${{ steps.dev-profile.outputs.repo }}
           GEMINI_MODEL: ${{ inputs.model }}
           MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
         run: node review_script.js
@@ -442,6 +553,10 @@ jobs:
                   summary = reviewOutput.replace(arrayMatch[0], '').trim();
                 }
               }
+              // Remove the developer profile section from the summary (it's saved separately)
+              summary = summary.replace(/```developer-profile[\s\S]*?```/g, '').trim();
+              // Also remove the "PART 3" header if present
+              summary = summary.replace(/---\s*\n*##\s*PART 3:.*$/s, '').trim();
             } catch (e) {
               console.log('Could not parse inline comments:', e.message);
             }
@@ -576,3 +691,46 @@ jobs:
                 body: summaryBody
               });
             }
+
+      - name: Extract and save developer profile
+        if: ${{ secrets.DEV_PROFILES_PAT != '' }}
+        run: |
+          AUTHOR="${{ steps.dev-profile.outputs.author }}"
+          REVIEW_OUTPUT=$(cat review_output.txt)
+
+          # Extract developer profile from the output
+          PROFILE=$(echo "$REVIEW_OUTPUT" | sed -n '/```developer-profile/,/```/p' | sed '1d;$d')
+
+          if [ -n "$PROFILE" ]; then
+            echo "Extracted developer profile for ${AUTHOR}"
+            mkdir -p dev-profiles/devs
+            echo "$PROFILE" > "dev-profiles/devs/${AUTHOR}.md"
+            echo "Profile saved to dev-profiles/devs/${AUTHOR}.md"
+          else
+            echo "No developer profile found in output, skipping update"
+          fi
+
+      - name: Push updated developer profile
+        if: ${{ secrets.DEV_PROFILES_PAT != '' }}
+        run: |
+          AUTHOR="${{ steps.dev-profile.outputs.author }}"
+          PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
+
+          if [ -f "$PROFILE_PATH" ]; then
+            cd dev-profiles
+            git config user.name "AI Review Bot"
+            git config user.email "ai-review@sprintx.com"
+            git add devs/
+
+            # Only commit if there are changes
+            if git diff --staged --quiet; then
+              echo "No changes to developer profile"
+            else
+              git commit -m "Update profile: ${AUTHOR} - $(date +%Y-%m-%d)"
+              git push https://x-access-token:${{ secrets.DEV_PROFILES_PAT }}@github.com/${{ inputs.dev_profiles_repo }}.git
+              echo "Successfully pushed updated profile for ${AUTHOR}"
+            fi
+          else
+            echo "No profile file to push"
+          fi
+        continue-on-error: true
