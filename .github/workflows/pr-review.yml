@@ -75,6 +75,7 @@ jobs:
 
       - name: Checkout developer profiles
         id: checkout-profiles
+        if: ${{ secrets.DEV_PROFILES_PAT }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.dev_profiles_repo }}
