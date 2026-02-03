@@ -74,7 +74,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout developer profiles
-        if: ${{ secrets.DEV_PROFILES_PAT != '' }}
+        id: checkout-profiles
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.dev_profiles_repo }}
@@ -693,7 +693,7 @@ jobs:
             }
 
       - name: Extract and save developer profile
-        if: ${{ secrets.DEV_PROFILES_PAT != '' }}
+        if: ${{ steps.checkout-profiles.outcome == 'success' }}
         run: |
           AUTHOR="${{ steps.dev-profile.outputs.author }}"
           REVIEW_OUTPUT=$(cat review_output.txt)
@@ -711,7 +711,10 @@ jobs:
           fi
 
       - name: Push updated developer profile
-        if: ${{ secrets.DEV_PROFILES_PAT != '' }}
+        if: ${{ steps.checkout-profiles.outcome == 'success' }}
+        env:
+          DEV_PROFILES_PAT: ${{ secrets.DEV_PROFILES_PAT }}
+          DEV_PROFILES_REPO: ${{ inputs.dev_profiles_repo }}
         run: |
           AUTHOR="${{ steps.dev-profile.outputs.author }}"
           PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
@@ -727,7 +730,7 @@ jobs:
               echo "No changes to developer profile"
             else
               git commit -m "Update profile: ${AUTHOR} - $(date +%Y-%m-%d)"
-              git push https://x-access-token:${{ secrets.DEV_PROFILES_PAT }}@github.com/${{ inputs.dev_profiles_repo }}.git
+              git push "https://x-access-token:${DEV_PROFILES_PAT}@github.com/${DEV_PROFILES_REPO}.git"
               echo "Successfully pushed updated profile for ${AUTHOR}"
             fi
           else
