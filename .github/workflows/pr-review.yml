@@ -75,9 +75,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check PAT availability
+        run: |
+          if [ -n "${{ secrets.DEV_PROFILES_PAT }}" ]; then
+            echo "DEV_PROFILES_PAT is available"
+            echo "HAS_PAT=true" >> $GITHUB_ENV
+          else
+            echo "DEV_PROFILES_PAT is NOT available"
+            echo "HAS_PAT=false" >> $GITHUB_ENV
+          fi
+
       - name: Checkout developer profiles
         id: checkout-profiles
-        if: ${{ env.HAS_DEV_PROFILES_PAT == 'true' }}
+        if: ${{ env.HAS_PAT == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.dev_profiles_repo }}
@@ -699,18 +709,36 @@ jobs:
         if: ${{ steps.checkout-profiles.outcome == 'success' }}
         run: |
           AUTHOR="${{ steps.dev-profile.outputs.author }}"
+
+          echo "=== DEBUG: Checking profile extraction ==="
+          echo "Author: ${AUTHOR}"
+          echo "Checkout outcome: ${{ steps.checkout-profiles.outcome }}"
+
+          if [ ! -f "review_output.txt" ]; then
+            echo "ERROR: review_output.txt not found!"
+            exit 1
+          fi
+
           REVIEW_OUTPUT=$(cat review_output.txt)
+          echo "Review output length: ${#REVIEW_OUTPUT}"
 
           # Extract developer profile from the output
           PROFILE=$(echo "$REVIEW_OUTPUT" | sed -n '/```developer-profile/,/```/p' | sed '1d;$d')
 
+          echo "Extracted profile length: ${#PROFILE}"
+
           if [ -n "$PROFILE" ]; then
-            echo "Extracted developer profile for ${AUTHOR}"
+            echo "✓ Extracted developer profile for ${AUTHOR}"
             mkdir -p dev-profiles/devs
             echo "$PROFILE" > "dev-profiles/devs/${AUTHOR}.md"
-            echo "Profile saved to dev-profiles/devs/${AUTHOR}.md"
+            echo "✓ Profile saved to dev-profiles/devs/${AUTHOR}.md"
+            echo "Profile content preview:"
+            head -n 5 "dev-profiles/devs/${AUTHOR}.md"
           else
-            echo "No developer profile found in output, skipping update"
+            echo "⚠ No developer profile found in output"
+            echo "Searching for profile markers in output..."
+            grep -n "developer-profile" review_output.txt || echo "No 'developer-profile' marker found"
+            grep -n "PART 3" review_output.txt || echo "No 'PART 3' marker found"
           fi
 
       - name: Push updated developer profile
@@ -722,21 +750,43 @@ jobs:
           AUTHOR="${{ steps.dev-profile.outputs.author }}"
           PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
 
+          echo "=== DEBUG: Pushing profile ==="
+          echo "Profile path: ${PROFILE_PATH}"
+          echo "File exists: $([ -f "$PROFILE_PATH" ] && echo 'YES' || echo 'NO')"
+
           if [ -f "$PROFILE_PATH" ]; then
+            echo "✓ Profile file found"
             cd dev-profiles
+
+            # Check if devs folder exists in repo
+            if [ ! -d "devs" ]; then
+              echo "Creating devs directory"
+              mkdir -p devs
+            fi
+
+            # Copy profile to devs folder
+            cp "../${PROFILE_PATH}" "devs/${AUTHOR}.md"
+
             git config user.name "AI Review Bot"
             git config user.email "ai-review@sprintx.com"
             git add devs/
 
+            echo "Git status:"
+            git status
+
             # Only commit if there are changes
             if git diff --staged --quiet; then
-              echo "No changes to developer profile"
+              echo "⚠ No changes to developer profile"
             else
+              echo "✓ Changes detected, committing..."
               git commit -m "Update profile: ${AUTHOR} - $(date +%Y-%m-%d)"
+              echo "✓ Pushing to remote..."
               git push "https://x-access-token:${DEV_PROFILES_PAT}@github.com/${DEV_PROFILES_REPO}.git"
-              echo "Successfully pushed updated profile for ${AUTHOR}"
+              echo "✓ Successfully pushed updated profile for ${AUTHOR}"
             fi
           else
-            echo "No profile file to push"
+            echo "⚠ No profile file found at ${PROFILE_PATH}"
+            echo "Listing dev-profiles directory:"
+            ls -la dev-profiles/ || echo "dev-profiles directory not found"
           fi
         continue-on-error: true
