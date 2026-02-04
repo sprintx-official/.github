@@ -12,7 +12,7 @@
 #     secrets: inherit
 # =============================================================================
 
-name: AI PR Review (Reusable)
+name: ZOBI PR Review
 
 on:
   workflow_call:
@@ -65,7 +65,7 @@ permissions:
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    name: Gemini PR Review
+    name: ZOBI PR Review
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -86,15 +86,27 @@ jobs:
         run: |
           AUTHOR="${{ github.event.pull_request.user.login }}"
           REPO_NAME="${{ github.event.repository.name }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
           echo "author=${AUTHOR}" >> $GITHUB_OUTPUT
           echo "repo=${REPO_NAME}" >> $GITHUB_OUTPUT
+          echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
 
           PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
           if [ -f "$PROFILE_PATH" ]; then
             echo "Found existing profile for ${AUTHOR}"
             cat "$PROFILE_PATH" > dev_profile.txt
+
+            # Check if this PR was already reviewed (to avoid incrementing count)
+            if grep -q "PR #${PR_NUMBER} (${REPO_NAME})" "$PROFILE_PATH"; then
+              echo "pr_already_reviewed=true" >> $GITHUB_OUTPUT
+              echo "This PR (#${PR_NUMBER}) was already reviewed - will not increment count"
+            else
+              echo "pr_already_reviewed=false" >> $GITHUB_OUTPUT
+              echo "First review for PR #${PR_NUMBER}"
+            fi
           else
             echo "Creating new profile template for ${AUTHOR}"
+            echo "pr_already_reviewed=false" >> $GITHUB_OUTPUT
             cat > dev_profile.txt << EOF
           # Developer Profile: ${AUTHOR}
 
@@ -102,6 +114,9 @@ jobs:
           - **Total PRs Reviewed:** 0
           - **Last Review:** Never
           - **Repositories:** None yet
+
+          ## Reviewed PRs
+          <!-- Tracks which PRs have been reviewed to avoid duplicate counting -->
 
           ## Strengths
           (To be discovered through code reviews)
@@ -122,8 +137,44 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
-          git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr_diff.txt
-          git diff --name-only origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > changed_files.txt
+          AUTHOR="${{ steps.dev-profile.outputs.author }}"
+          PR_NUMBER="${{ steps.dev-profile.outputs.pr_number }}"
+          REPO_NAME="${{ steps.dev-profile.outputs.repo }}"
+          PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
+
+          # Check if we have a last reviewed commit for this PR
+          LAST_REVIEWED_COMMIT=""
+          if [ -f "$PROFILE_PATH" ]; then
+            # Extract last reviewed commit for this specific PR
+            LAST_REVIEWED_COMMIT=$(grep "PR #${PR_NUMBER} (${REPO_NAME})" "$PROFILE_PATH" | tail -1 | grep -oE '[a-f0-9]{40}' | head -1 || true)
+          fi
+
+          if [ -n "$LAST_REVIEWED_COMMIT" ]; then
+            echo "Found previous review at commit: ${LAST_REVIEWED_COMMIT}"
+            echo "Getting incremental diff since last review..."
+            echo "is_incremental=true" >> $GITHUB_OUTPUT
+            echo "last_commit=${LAST_REVIEWED_COMMIT}" >> $GITHUB_OUTPUT
+
+            # Get diff only for new commits since last review
+            git diff ${LAST_REVIEWED_COMMIT}...origin/${{ github.head_ref }} > pr_diff.txt
+            git diff --name-only ${LAST_REVIEWED_COMMIT}...origin/${{ github.head_ref }} > changed_files.txt
+
+            # Get list of new commits for context
+            echo "New commits since last review:" > new_commits.txt
+            git log --oneline ${LAST_REVIEWED_COMMIT}...origin/${{ github.head_ref }} >> new_commits.txt
+          else
+            echo "First review for this PR - getting full diff"
+            echo "is_incremental=false" >> $GITHUB_OUTPUT
+
+            git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr_diff.txt
+            git diff --name-only origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > changed_files.txt
+            echo "Full PR review" > new_commits.txt
+          fi
+
+          # Save current commit SHA for tracking
+          CURRENT_COMMIT=$(git rev-parse origin/${{ github.head_ref }})
+          echo "current_commit=${CURRENT_COMMIT}" >> $GITHUB_OUTPUT
+
           echo "Changed files:"
           cat changed_files.txt
 
@@ -234,12 +285,18 @@ jobs:
           const projectDocs = fs.readFileSync('project_docs_content.txt', 'utf8');
           const codebaseContext = fs.readFileSync('codebase_context.txt', 'utf8');
           const developerProfile = fs.existsSync('dev_profile.txt') ? fs.readFileSync('dev_profile.txt', 'utf8') : 'No developer profile available';
+          const newCommits = fs.existsSync('new_commits.txt') ? fs.readFileSync('new_commits.txt', 'utf8') : '';
           const prTitle = process.env.PR_TITLE || 'No title';
           const prBody = process.env.PR_BODY || 'No description';
           const prAuthor = process.env.PR_AUTHOR || 'unknown';
           const repoName = process.env.REPO_NAME || 'unknown';
+          const prNumber = process.env.PR_NUMBER || '0';
+          const currentCommit = process.env.CURRENT_COMMIT || 'unknown';
+          const isIncremental = process.env.IS_INCREMENTAL === 'true';
+          const prAlreadyReviewed = process.env.PR_ALREADY_REVIEWED === 'true';
           const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-          const today = new Date().toISOString().split('T')[0];
+          // Use the date from environment (set by GitHub Actions runner)
+          const today = process.env.REVIEW_DATE || new Date().toISOString().split('T')[0];
 
           const prompt = `You are a SENIOR STAFF ENGINEER conducting a thorough code review. You have deep expertise in software architecture, design patterns, and have seen many codebases evolve over years. You understand the long-term implications of code decisions.
 
@@ -296,13 +353,16 @@ jobs:
 
           **Author:** ${prAuthor}
           **Repository:** ${repoName}
+          **PR Number:** #${prNumber}
           **Title:** ${prTitle}
           **Description:** ${prBody}
+          **Review Type:** ${isIncremental ? 'INCREMENTAL (reviewing only NEW commits since last review)' : 'FULL (first review of this PR)'}
+          ${isIncremental ? `\n**New Commits Being Reviewed:**\n${newCommits}` : ''}
 
           ## Changed Files
           ${changedFiles}
 
-          ## Code Diff
+          ## Code Diff ${isIncremental ? '(Only changes since last review)' : ''}
           \`\`\`diff
           ${diff}
           \`\`\`
@@ -439,13 +499,23 @@ jobs:
           ## PART 3: Updated Developer Profile
           Output an updated profile for this developer. This will be saved and used for future reviews.
 
+          **IMPORTANT RULES FOR PROFILE UPDATE:**
+          - ${prAlreadyReviewed ? 'DO NOT increment Total PRs Reviewed - this is an UPDATE to an existing PR review' : 'INCREMENT Total PRs Reviewed by 1 - this is a NEW PR'}
+          - Always use today's date: ${today}
+          - Track the current commit: ${currentCommit}
+
           \`\`\`developer-profile
           # Developer Profile: ${prAuthor}
 
           ## Stats
-          - **Total PRs Reviewed:** [INCREMENT from previous or start at 1]
+          - **Total PRs Reviewed:** ${prAlreadyReviewed ? '[KEEP SAME - this PR was already counted]' : '[INCREMENT by 1 from previous, or start at 1]'}
           - **Last Review:** ${today}
           - **Repositories:** [ADD ${repoName} if not already listed]
+
+          ## Reviewed PRs
+          <!-- Format: PR #NUMBER (repo) - commit_sha - date -->
+          - PR #${prNumber} (${repoName}) - ${currentCommit} - ${today}
+          [Keep all previous PR entries]
 
           ## Strengths
           [List 3-5 positive patterns observed across all reviews]
@@ -454,9 +524,9 @@ jobs:
           [List issues with frequency count, e.g., "- [ ] Code reuse (seen 3x) - Description"]
 
           ## Recent Feedback History
-          | Date | Repo | Category | Issue Summary |
-          |------|------|----------|---------------|
-          | ${today} | ${repoName} | [category] | [brief issue from this PR] |
+          | Date | Repo | PR | Category | Issue Summary |
+          |------|------|-----|----------|---------------|
+          | ${today} | ${repoName} | #${prNumber} | [category] | [brief issue from this PR] |
           [Keep last 10 entries from previous profile]
 
           ## AI Learning Notes
@@ -527,7 +597,15 @@ jobs:
           REPO_NAME: ${{ steps.dev-profile.outputs.repo }}
           GEMINI_MODEL: ${{ inputs.model }}
           MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
-        run: node review_script.js
+          CURRENT_COMMIT: ${{ steps.diff.outputs.current_commit }}
+          IS_INCREMENTAL: ${{ steps.diff.outputs.is_incremental }}
+          PR_ALREADY_REVIEWED: ${{ steps.dev-profile.outputs.pr_already_reviewed }}
+          # Use UTC date to ensure consistent dates across all runners
+          REVIEW_DATE: ${{ github.event.pull_request.updated_at && format('{0}', github.event.pull_request.updated_at) || '' }}
+        run: |
+          # Set proper date (GitHub Actions runners are UTC)
+          export REVIEW_DATE=$(date -u +%Y-%m-%d)
+          node review_script.js
 
       - name: Post review with inline comments
         uses: actions/github-script@v7
@@ -657,7 +735,7 @@ jobs:
               }
             }
 
-            const summaryBody = `## 🤖 Senior Developer AI Review\n\n${summary}\n${categoryBreakdown}\n---\n*Reviewed as a senior developer by Gemini AI • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
+            const summaryBody = `## 🤖 ZOBI Review\n\n${summary}\n${categoryBreakdown}\n---\n*Reviewed by ZOBI (Senior AI Code Reviewer) • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
 
             try {
               if (reviewComments.length > 0) {
@@ -749,8 +827,8 @@ jobs:
             # Copy profile to devs folder (may already be there from extract step)
             cp "../${PROFILE_PATH}" "devs/${AUTHOR}.md" 2>/dev/null || true
 
-            git config user.name "AI Review Bot"
-            git config user.email "ai-review@sprintx.com"
+            git config user.name "ZOBI Review"
+            git config user.email "zobi-review@sprintx.com"
             git add devs/
 
             echo "Git status:"
@@ -761,7 +839,7 @@ jobs:
               echo "⚠ No changes to developer profile"
             else
               echo "✓ Changes detected, committing..."
-              git commit -m "Update profile: ${AUTHOR} - $(date +%Y-%m-%d)"
+              git commit -m "ZOBI: Update profile for ${AUTHOR} - $(date -u +%Y-%m-%d)"
               echo "✓ Pushing to remote..."
               git push
               echo "✓ Successfully pushed updated profile for ${AUTHOR}"
