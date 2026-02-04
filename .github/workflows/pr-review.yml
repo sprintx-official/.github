@@ -66,9 +66,6 @@ jobs:
   ai-review:
     runs-on: ubuntu-latest
     name: Gemini PR Review
-    env:
-      HAS_DEV_PROFILES_PAT: ${{ secrets.DEV_PROFILES_PAT != '' }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -77,14 +74,12 @@ jobs:
 
       - name: Checkout developer profiles
         id: checkout-profiles
-        if: ${{ env.HAS_DEV_PROFILES_PAT == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.dev_profiles_repo }}
           token: ${{ secrets.DEV_PROFILES_PAT }}
           path: dev-profiles
-          persist-credentials: false
-        continue-on-error: true
+          persist-credentials: true
 
       - name: Read developer profile
         id: dev-profile
@@ -696,7 +691,7 @@ jobs:
             }
 
       - name: Extract and save developer profile
-        if: ${{ steps.checkout-profiles.outcome == 'success' }}
+        if: steps.checkout-profiles.outcome == 'success'
         run: |
           AUTHOR="${{ steps.dev-profile.outputs.author }}"
 
@@ -732,10 +727,7 @@ jobs:
           fi
 
       - name: Push updated developer profile
-        if: ${{ steps.checkout-profiles.outcome == 'success' }}
-        env:
-          DEV_PROFILES_PAT: ${{ secrets.DEV_PROFILES_PAT }}
-          DEV_PROFILES_REPO: ${{ inputs.dev_profiles_repo }}
+        if: steps.checkout-profiles.outcome == 'success'
         run: |
           AUTHOR="${{ steps.dev-profile.outputs.author }}"
           PROFILE_PATH="dev-profiles/devs/${AUTHOR}.md"
@@ -754,8 +746,8 @@ jobs:
               mkdir -p devs
             fi
 
-            # Copy profile to devs folder
-            cp "../${PROFILE_PATH}" "devs/${AUTHOR}.md"
+            # Copy profile to devs folder (may already be there from extract step)
+            cp "../${PROFILE_PATH}" "devs/${AUTHOR}.md" 2>/dev/null || true
 
             git config user.name "AI Review Bot"
             git config user.email "ai-review@sprintx.com"
@@ -771,7 +763,7 @@ jobs:
               echo "✓ Changes detected, committing..."
               git commit -m "Update profile: ${AUTHOR} - $(date +%Y-%m-%d)"
               echo "✓ Pushing to remote..."
-              git push "https://x-access-token:${DEV_PROFILES_PAT}@github.com/${DEV_PROFILES_REPO}.git"
+              git push
               echo "✓ Successfully pushed updated profile for ${AUTHOR}"
             fi
           else
