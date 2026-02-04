@@ -75,19 +75,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check PAT availability
-        run: |
-          if [ -n "${{ secrets.DEV_PROFILES_PAT }}" ]; then
-            echo "DEV_PROFILES_PAT is available"
-            echo "HAS_PAT=true" >> $GITHUB_ENV
-          else
-            echo "DEV_PROFILES_PAT is NOT available"
-            echo "HAS_PAT=false" >> $GITHUB_ENV
-          fi
-
       - name: Checkout developer profiles
         id: checkout-profiles
-        if: ${{ env.HAS_PAT == 'true' }}
+        if: ${{ env.HAS_DEV_PROFILES_PAT == 'true' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.dev_profiles_repo }}
