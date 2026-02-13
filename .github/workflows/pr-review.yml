@@ -47,6 +47,11 @@ on:
         required: false
         type: string
         default: '["src/components/**/*", "src/lib/**/*", "src/utils/**/*", "src/helpers/**/*", "src/hooks/**/*", "src/constants/**/*", "src/shared/**/*", "lib/**/*", "utils/**/*", "common/**/*"]'
+      reviewer_instruction:
+        description: 'Custom instruction from reviewer (e.g., from @zobi comment)'
+        required: false
+        type: string
+        default: ''
       dev_profiles_repo:
         description: 'Private repo for developer profiles (org/repo format)'
         required: false
@@ -317,6 +322,7 @@ jobs:
           const prAlreadyReviewed = process.env.PR_ALREADY_REVIEWED === 'true';
           const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
           const today = process.env.REVIEW_DATE || new Date().toISOString().split('T')[0];
+          const reviewerInstruction = process.env.REVIEWER_INSTRUCTION || '';
 
           // Replace all placeholders in prompt template
           const prompt = promptTemplate
@@ -336,7 +342,8 @@ jobs:
             .replace(/\{\{currentCommit\}\}/g, currentCommit)
             .replace(/\{\{isIncremental\}\}/g, String(isIncremental))
             .replace(/\{\{newCommits\}\}/g, newCommits)
-            .replace(/\{\{prAlreadyReviewed\}\}/g, String(prAlreadyReviewed));
+            .replace(/\{\{prAlreadyReviewed\}\}/g, String(prAlreadyReviewed))
+            .replace(/\{\{reviewerInstruction\}\}/g, reviewerInstruction);
 
           console.log('Prompt loaded from ZOBI_REVIEW_PROMPT secret');
 
@@ -405,6 +412,7 @@ jobs:
           CURRENT_COMMIT: ${{ steps.diff.outputs.current_commit }}
           IS_INCREMENTAL: ${{ steps.diff.outputs.is_incremental }}
           PR_ALREADY_REVIEWED: ${{ steps.dev-profile.outputs.pr_already_reviewed }}
+          REVIEWER_INSTRUCTION: ${{ inputs.reviewer_instruction }}
           # Use UTC date to ensure consistent dates across all runners
           REVIEW_DATE: ${{ github.event.pull_request.updated_at && format('{0}', github.event.pull_request.updated_at) || '' }}
         run: |
