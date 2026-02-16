@@ -187,14 +187,22 @@ jobs:
           echo "Head branch: ${HEAD_REF}"
           echo "Base branch: ${BASE_REF}"
 
+          # Check if reviewer provided a custom instruction (e.g., @zobi check types)
+          # If so, always do a full diff — the user wants a re-review with different focus
+          REVIEWER_INSTRUCTION="${{ inputs.reviewer_instruction }}"
+
           # Check if we have a last reviewed commit for this PR
           LAST_REVIEWED_COMMIT=""
-          if [ -f "$PROFILE_PATH" ]; then
-            # Extract last reviewed commit for this specific PR
+          if [ -z "$REVIEWER_INSTRUCTION" ] && [ -f "$PROFILE_PATH" ]; then
+            # Only use incremental diff when there's no custom instruction
             LAST_REVIEWED_COMMIT=$(grep "PR #${PR_NUMBER} (${REPO_NAME})" "$PROFILE_PATH" | tail -1 | grep -oE '[a-f0-9]{40}' | head -1 || true)
           fi
 
-          if [ -n "$LAST_REVIEWED_COMMIT" ]; then
+          if [ -n "$REVIEWER_INSTRUCTION" ]; then
+            echo "Reviewer instruction provided — doing full PR diff for focused re-review"
+          fi
+
+          if [ -n "$LAST_REVIEWED_COMMIT" ] && [ -z "$REVIEWER_INSTRUCTION" ]; then
             echo "Found previous review at commit: ${LAST_REVIEWED_COMMIT}"
             echo "Getting incremental diff since last review..."
             echo "is_incremental=true" >> $GITHUB_OUTPUT
