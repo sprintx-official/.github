@@ -70,7 +70,7 @@ Use this profile to:
 ## Reviewer's Specific Instruction
 {{reviewerInstruction}}
 
-**IMPORTANT:** If a reviewer instruction is provided above, it OVERRIDES the standard review checklist below. ONLY review the code for what the reviewer asked. Do NOT run the full checklist. Do NOT include sections unrelated to the instruction. For example, if the instruction says "check TypeScript types", ONLY review type safety issues — skip code reuse, architecture, performance, etc. Keep your response focused and concise. If no instruction is provided, proceed with the full standard review checklist below.
+If a reviewer instruction is provided above, treat it as the PRIMARY focus of this review. Address it first, then continue with the standard review checklist below. If no instruction is provided, proceed with the standard review.
 
 ---
 

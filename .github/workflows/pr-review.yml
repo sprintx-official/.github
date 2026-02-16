@@ -390,10 +390,20 @@ jobs:
             .replace(/\{\{prAlreadyReviewed\}\}/g, String(prAlreadyReviewed))
             .replace(/\{\{reviewerInstruction\}\}/g, reviewerInstruction);
 
+          // When a reviewer gives a specific instruction via @zobi, override the full review
+          // and focus ONLY on what they asked. This avoids needing to update the secret.
+          let finalPrompt = prompt;
+          if (reviewerInstruction) {
+            finalPrompt += `\n\n---\n\n**CRITICAL OVERRIDE:** The reviewer has given a specific instruction: "${reviewerInstruction}". You MUST ONLY review the code for what the reviewer asked. Do NOT run the full review checklist. Do NOT include unrelated sections (code reuse, architecture, performance, etc. unless specifically asked). Keep your response focused and concise — only address what the reviewer requested. If they say "check TypeScript types", ONLY find type safety issues. If they say "look for security issues", ONLY find security issues. Ignore everything else.`;
+          }
+
           console.log('Prompt loaded from ZOBI_REVIEW_PROMPT secret');
+          if (reviewerInstruction) {
+            console.log('Focused review mode: ' + reviewerInstruction);
+          }
 
           const requestBody = JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
+            contents: [{ parts: [{ text: finalPrompt }] }],
             generationConfig: {
               temperature: 0.3,
               topK: 40,
