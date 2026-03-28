@@ -102,7 +102,7 @@ permissions:
 
 jobs:
   ai-review:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     name: ZOBI PR Review
     steps:
       - name: Checkout repository
@@ -394,7 +394,11 @@ jobs:
           // and focus ONLY on what they asked. This avoids needing to update the secret.
           let finalPrompt = prompt;
           if (reviewerInstruction) {
-            finalPrompt += `\n\n---\n\n**CRITICAL OVERRIDE:** The reviewer has given a specific instruction: "${reviewerInstruction}". You MUST ONLY review the code for what the reviewer asked. Do NOT run the full review checklist. Do NOT include unrelated sections (code reuse, architecture, performance, etc. unless specifically asked). Keep your response focused and concise — only address what the reviewer requested. If they say "check TypeScript types", ONLY find type safety issues. If they say "look for security issues", ONLY find security issues. Ignore everything else.`;
+            finalPrompt += `
+
+---
+
+**CRITICAL OVERRIDE:** The reviewer has given a specific instruction: "${reviewerInstruction}". You MUST ONLY review the code for what the reviewer asked. Do NOT run the full review checklist. Do NOT include unrelated sections (code reuse, architecture, performance, etc. unless specifically asked). Keep your response focused and concise — only address what the reviewer requested. If they say "check TypeScript types", ONLY find type safety issues. If they say "look for security issues", ONLY find security issues. Ignore everything else.`;
           }
 
           console.log('Prompt loaded from ZOBI_REVIEW_PROMPT secret');
@@ -489,10 +493,14 @@ jobs:
             let summary = reviewOutput;
 
             try {
-              const jsonMatch = reviewOutput.match(/```json\n?([\s\S]*?)\n?```/);
+              const jsonMatch = reviewOutput.match(/```json
+?([\s\S]*?)
+?```/);
               if (jsonMatch) {
                 inlineComments = JSON.parse(jsonMatch[1]);
-                summary = reviewOutput.replace(/```json\n?[\s\S]*?\n?```/, '').trim();
+                summary = reviewOutput.replace(/```json
+?[\s\S]*?
+?```/, '').trim();
               } else {
                 const arrayMatch = reviewOutput.match(/\[\s*\{[\s\S]*?\}\s*\]/);
                 if (arrayMatch) {
@@ -503,7 +511,8 @@ jobs:
               // Remove the developer profile section from the summary (it's saved separately)
               summary = summary.replace(/```developer-profile[\s\S]*?```/g, '').trim();
               // Also remove the "PART 3" header if present
-              summary = summary.replace(/---\s*\n*##\s*PART 3:.*$/s, '').trim();
+              summary = summary.replace(/---\s*
+*##\s*PART 3:.*$/s, '').trim();
             } catch (e) {
               console.log('Could not parse inline comments:', e.message);
             }
@@ -523,7 +532,8 @@ jobs:
               const patch = filePatches[filename];
               if (!patch) return null;
 
-              const lines = patch.split('\n');
+              const lines = patch.split('
+');
               let currentLine = 0;
               let position = 0;
 
@@ -579,7 +589,9 @@ jobs:
                 reviewComments.push({
                   path: comment.file,
                   position: position,
-                  body: `${sevEmoji} **${(comment.severity || 'comment').toUpperCase()}**${categoryTag}\n\n${catEmoji} ${comment.comment}`
+                  body: `${sevEmoji} **${(comment.severity || 'comment').toUpperCase()}**${categoryTag}
+
+${catEmoji} ${comment.comment}`
                 });
               }
             }
@@ -598,15 +610,24 @@ jobs:
             // Build category breakdown
             let categoryBreakdown = '';
             if (Object.keys(categoryCounts).length > 0) {
-              categoryBreakdown = '\n\n**Issues by Category:**\n';
+              categoryBreakdown = '
+
+**Issues by Category:**
+';
               for (const [cat, count] of Object.entries(categoryCounts)) {
                 const emoji = categoryEmoji[cat] || '📝';
                 const label = categoryLabel[cat] || cat;
-                categoryBreakdown += `- ${emoji} ${label}: ${count}\n`;
+                categoryBreakdown += `- ${emoji} ${label}: ${count}
+`;
               }
             }
 
-            const summaryBody = `## 🤖 ZOBI Review\n\n${summary}\n${categoryBreakdown}\n---\n*Reviewed by ZOBI (Senior AI Code Reviewer) • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
+            const summaryBody = `## 🤖 ZOBI Review
+
+${summary}
+${categoryBreakdown}
+---
+*Reviewed by ZOBI (Senior AI Code Reviewer) • ${reviewComments.length} inline comments • ${hasCritical ? '🔴 Has critical issues' : hasWarning ? '🟠 Has warnings' : '✅ Looks good'}*`;
 
             try {
               if (reviewComments.length > 0) {
