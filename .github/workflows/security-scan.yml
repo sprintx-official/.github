@@ -75,7 +75,7 @@ jobs:
               echo "::error file=$file::Whitespace padding malware"; FAILED=1
               echo "- BLOCKED: \`$file\` has suspicious whitespace padding" >> $GITHUB_STEP_SUMMARY
             fi
-            if grep -qE 'eval\s*\(|new\s+Function\s*\(|Function\s*\(' "$file" 2>/dev/null; then
+            if grep -qE 'eval\s*\(|new\s+Function\s*\(|Function\s*\(' "$file" 2>/dev/null; then
               echo "::error file=$file::eval/Function in config"; FAILED=1
               echo "- BLOCKED: \`$file\` uses eval()/Function()" >> $GITHUB_STEP_SUMMARY
             fi
@@ -179,6 +179,55 @@ jobs:
           [ $FAILED -eq 0 ] && echo "- No suspicious npm patterns" >> $GITHUB_STEP_SUMMARY
           echo "failed=$FAILED" >> $GITHUB_OUTPUT
 
+      # =====================================================================
+      # NEW: npm audit — catch known CVEs in dependencies
+      # =====================================================================
+      - name: "Check: NPM dependency vulnerabilities"
+        id: npm_audit
+        shell: bash
+        run: |
+          echo "### NPM Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          FAILED=0
+
+          # Find lock files (npm audit needs package-lock.json or npm-shrinkwrap.json)
+          LOCK_FILES=$(find . -maxdepth 3 -name "package-lock.json" -not -path "*/node_modules/*" 2>/dev/null || true)
+
+          if [ -z "$LOCK_FILES" ]; then
+            # Try yarn.lock with yarn audit
+            YARN_LOCKS=$(find . -maxdepth 3 -name "yarn.lock" -not -path "*/node_modules/*" 2>/dev/null || true)
+            if [ -z "$YARN_LOCKS" ]; then
+              echo "- No lock files found, skipping audit" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+          for lockfile in $LOCK_FILES; do
+            DIR=$(dirname "$lockfile")
+            echo "Auditing $DIR..."
+
+            # Run npm audit, only fail on high/critical
+            AUDIT_OUTPUT=$(cd "$DIR" && npm audit --audit-level=high --json 2>/dev/null || true)
+
+            HIGH_COUNT=$(echo "$AUDIT_OUTPUT" | jq '.metadata.vulnerabilities.high // 0' 2>/dev/null || echo "0")
+            CRITICAL_COUNT=$(echo "$AUDIT_OUTPUT" | jq '.metadata.vulnerabilities.critical // 0' 2>/dev/null || echo "0")
+
+            if [ "$CRITICAL_COUNT" -gt 0 ] 2>/dev/null; then
+              echo "::error file=$lockfile::$CRITICAL_COUNT critical vulnerabilities found"
+              echo "- BLOCKED: \`$DIR\` has **$CRITICAL_COUNT critical** vulnerabilities" >> $GITHUB_STEP_SUMMARY
+              FAILED=1
+            fi
+
+            if [ "$HIGH_COUNT" -gt 0 ] 2>/dev/null; then
+              echo "::warning file=$lockfile::$HIGH_COUNT high vulnerabilities found"
+              echo "- WARNING: \`$DIR\` has **$HIGH_COUNT high** vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if [ "$CRITICAL_COUNT" -eq 0 ] 2>/dev/null && [ "$HIGH_COUNT" -eq 0 ] 2>/dev/null; then
+              echo "- \`$DIR\` — no high/critical vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+
       - name: "Check: Code security patterns (SAST)"
         id: sast
         shell: bash
@@ -187,12 +236,19 @@ jobs:
           FAILED=0; WARNS=0
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD 2>/dev/null | grep -E '\.(js|jsx|ts|tsx|mjs|cjs)$' | grep -v node_modules || true)
+            ALL_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD 2>/dev/null | grep -v node_modules || true)
           else
-            FILES=$(git diff --name-only HEAD~1...HEAD 2>/dev/null | grep -E '\.(js|jsx|ts|tsx|mjs|cjs)$' | grep -v node_modules || true)
+            ALL_FILES=$(git diff --name-only HEAD~1...HEAD 2>/dev/null | grep -v node_modules || true)
           fi
 
-          for file in $FILES; do
+          # JavaScript/TypeScript files
+          JS_FILES=$(echo "$ALL_FILES" | grep -E '\.(js|jsx|ts|tsx|mjs|cjs)$' || true)
+
+          # Python files
+          PY_FILES=$(echo "$ALL_FILES" | grep -E '\.py$' || true)
+
+          # ---- JavaScript/TypeScript SAST ----
+          for file in $JS_FILES; do
             [ -f "$file" ] || continue
 
             if grep -qE 'rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED.*0' "$file" 2>/dev/null; then
@@ -218,6 +274,108 @@ jobs:
             if grep -qE "createHash\s*\(\s*['\"]md5['\"]" "$file" 2>/dev/null; then
               echo "::warning file=$file::Weak hash (MD5)"; WARNS=$((WARNS+1))
               echo "- WARNING: \`$file\` uses MD5" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # ---- XSS Detection (React/JS) ----
+            if grep -nE 'dangerouslySetInnerHTML' "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::dangerouslySetInnerHTML usage — potential XSS"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` uses \`dangerouslySetInnerHTML\` — verify input is sanitized" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if grep -nE '\.innerHTML\s*=' "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::innerHTML assignment — potential XSS"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` sets \`.innerHTML\` directly — use textContent or sanitize" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if grep -nE '\$\(.*\)\.html\s*\(' "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::jQuery .html() — potential XSS"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` uses jQuery \`.html()\` — verify input is sanitized" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if grep -nE "document\.(write|writeln)\s*\(" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::error file=$file::document.write — XSS risk"; FAILED=1
+              echo "- BLOCKED: \`$file\` uses \`document.write()\` — high XSS risk" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if grep -nE "\.outerHTML\s*=" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::outerHTML assignment — potential XSS"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` sets \`.outerHTML\` directly — verify input is sanitized" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if grep -nE "insertAdjacentHTML\s*\(" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::insertAdjacentHTML — potential XSS"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` uses \`insertAdjacentHTML\` — verify input is sanitized" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Unescaped template literals in response (server-side XSS)
+            if grep -nE "res\.(send|write)\s*\(\s*\`" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::Template literal in HTTP response — potential XSS"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` sends template literal in response — use proper templating" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          # ---- Python SAST ----
+          for file in $PY_FILES; do
+            [ -f "$file" ] || continue
+
+            # Command injection
+            if grep -nE "(os\.system|os\.popen|subprocess\.(call|run|Popen))\s*\(.*f['\"]" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::Potential command injection (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` possible command injection — use parameterized subprocess" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Shell=True in subprocess
+            if grep -nE "subprocess\.(call|run|Popen)\s*\(.*shell\s*=\s*True" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::subprocess with shell=True (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` uses \`shell=True\` — vulnerable to injection" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # SQL injection (raw queries with f-strings)
+            if grep -nE "(execute|executemany|raw)\s*\(.*f['\"]" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::Potential SQL injection (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` possible SQL injection — use parameterized queries" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # eval/exec
+            if grep -nE "^\s*(eval|exec)\s*\(" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::error file=$file::eval()/exec() usage (Python)"; FAILED=1
+              echo "- BLOCKED: \`$file\` uses \`eval()\`/\`exec()\` — code execution risk" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # pickle.loads (deserialization attack)
+            if grep -nE "pickle\.(loads|load)\s*\(" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::pickle deserialization (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` uses \`pickle.load()\` — deserialization attack risk" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Weak hashing
+            if grep -nE "hashlib\.(md5|sha1)\s*\(" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::Weak hash algorithm (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` uses weak hash (MD5/SHA1) — use SHA-256+" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Disabled SSL verification
+            if grep -nE "verify\s*=\s*False" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::error file=$file::SSL verification disabled (Python)"; FAILED=1
+              echo "- BLOCKED: \`$file\` disables SSL verification" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Django/Flask debug mode in production
+            if grep -nE "DEBUG\s*=\s*True" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::DEBUG=True (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` has \`DEBUG=True\` — ensure this is not production" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Hardcoded secrets in Python
+            if grep -nE "(password|secret|api_key|token)\s*=\s*['\"][^'\"]{8,}['\"]" "$file" 2>/dev/null | grep -viE '(example|placeholder|xxx|test|dummy|changeme|your_)' | head -1 | grep -q .; then
+              echo "::warning file=$file::Possible hardcoded secret (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` may contain a hardcoded secret" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # SSRF via user-controlled URLs
+            if grep -nE "requests\.(get|post|put|delete)\s*\(.*request\.(args|form|json)" "$file" 2>/dev/null | head -1 | grep -q .; then
+              echo "::warning file=$file::Potential SSRF (Python)"; WARNS=$((WARNS+1))
+              echo "- WARNING: \`$file\` passes user input to HTTP request — SSRF risk" >> $GITHUB_STEP_SUMMARY
             fi
           done
 
@@ -284,6 +442,7 @@ jobs:
           [ "${{ steps.gitignore.outputs.failed }}" = "1" ] && TOTAL_FAILED=$((TOTAL_FAILED+1))
           [ "${{ steps.secret_leaks.outputs.failed }}" = "1" ] && TOTAL_FAILED=$((TOTAL_FAILED+1))
           [ "${{ steps.npm_security.outputs.failed }}" = "1" ] && TOTAL_FAILED=$((TOTAL_FAILED+1))
+          [ "${{ steps.npm_audit.outputs.failed }}" = "1" ] && TOTAL_FAILED=$((TOTAL_FAILED+1))
           [ "${{ steps.sast.outputs.failed }}" = "1" ] && TOTAL_FAILED=$((TOTAL_FAILED+1))
           [ "${{ steps.infra.outputs.failed }}" = "1" ] && TOTAL_FAILED=$((TOTAL_FAILED+1))
 
