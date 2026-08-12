@@ -68,7 +68,8 @@ jobs:
       - name: Run security scan
         shell: bash
         run: |
-          set -uo pipefail
+          set +e +o pipefail          # GitHub runs steps with -e -o pipefail;
+          set -u                      # a non-matching grep must not kill the scan
           FAIL=0
           note() { echo "::error file=$1::$2"; echo "- **$1** — $2" >> $GITHUB_STEP_SUMMARY; FAIL=1; }
           warn() { echo "::warning file=$1::$2"; echo "- _$1_ — $2" >> $GITHUB_STEP_SUMMARY; }
@@ -86,7 +87,7 @@ jobs:
 
             # ---------- 2. STRUCTURAL OBFUSCATION ----------
             # catches new variants with no known signature
-            LONGEST=$(awk '{ if (length($0) > m) m = length($0) } END { print m+0 }' "$f" 2>/dev/null)
+            LONGEST=$(awk '{ if (length($0) > m) m = length($0) } END { print m+0 }' "$f" 2>/dev/null); LONGEST=${LONGEST:-0}
             case "$f" in
               *.js|*.mjs|*.cjs|*.ts|*.tsx|*.jsx)
                 # minified libraries legitimately have long lines; config/entry files do not
@@ -105,7 +106,7 @@ jobs:
                     ;;
                 esac
                 # dense unicode escaping is an obfuscator hallmark
-                U=$(grep -oa '\\u00' "$f" 2>/dev/null | wc -l | tr -d ' ')
+                U=$(grep -oac '\\u00' "$f" 2>/dev/null); U=${U:-0}
                 if [ "${U:-0}" -gt 50 ]; then
                   note "$f" "OBFUSCATION: ${U} unicode escape sequences"
                 fi
