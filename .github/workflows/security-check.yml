@@ -1,0 +1,195 @@
+# ============================================================================
+#  DO NOT DELETE OR RENAME THIS FILE WITHOUT READING THIS FIRST
+#
+#  This workflow is referenced by the ORG-LEVEL ruleset "Required security
+#  scan" (sprintx-official). GitHub requires it to pass before a pull request
+#  can be merged into a protected branch in ANY repository.
+#
+#  If this file is deleted, renamed, moved, or its branch is renamed:
+#     -> the ruleset points at a workflow that does not exist
+#     -> pull request merges BREAK ORG-WIDE
+#     -> the ruleset itself can no longer be edited (422 Validation Failed)
+#
+#  To retire this scanner, ALWAYS in this order:
+#     1. Remove the "workflows" rule from the "Required security scan" ruleset
+#     2. Only then delete this file
+#
+#  This happened once (2026-08-11). Do not repeat it.
+# ============================================================================
+name: Security Check
+
+# Runs on every push and PR. Scans ONLY the files changed in that push/PR,
+# so a typical run takes 10-20 seconds.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Malware / secrets / supply-chain scan
+    runs-on: ubuntu-latest        # NEVER self-hosted: the previous scanner used
+    timeout-minutes: 5            # self-hosted with no runner and queued forever
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine changed files
+        id: changed
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+          # new branch / first push: fall back to scanning the whole tree
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE" 2>/dev/null; then
+            git ls-files > /tmp/files.txt
+            echo "mode=full" >> $GITHUB_OUTPUT
+          else
+            git diff --name-only --diff-filter=ACMR "$BASE" "$HEAD" > /tmp/files.txt || git ls-files > /tmp/files.txt
+            echo "mode=diff" >> $GITHUB_OUTPUT
+          fi
+          # ignore paths that produce noise
+          grep -vE '(^|/)(node_modules|dist|build|\.next|vendor|coverage)/' /tmp/files.txt \
+            > /tmp/scan.txt || true
+          echo "count=$(wc -l < /tmp/scan.txt | tr -d ' ')" >> $GITHUB_OUTPUT
+          echo "Scanning $(wc -l < /tmp/scan.txt | tr -d ' ') file(s), mode=$( [ -s /tmp/files.txt ] && echo ok )"
+
+      - name: Run security scan
+        shell: bash
+        run: |
+          set -uo pipefail
+          FAIL=0
+          note() { echo "::error file=$1::$2"; echo "- **$1** — $2" >> $GITHUB_STEP_SUMMARY; FAIL=1; }
+          warn() { echo "::warning file=$1::$2"; echo "- _$1_ — $2" >> $GITHUB_STEP_SUMMARY; }
+
+          echo "## Security scan" >> $GITHUB_STEP_SUMMARY
+
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            [ -s "$f" ] || continue
+
+            # ---------- 1. KNOWN MALWARE INDICATORS ----------
+            if grep -qaE "eth-mainnet\.public\.blastapi\.io|api\.trongrid\.io|fullnode\.mainnet\.aptoslabs|bsc-dataseed\.binance\.org|bsc-rpc\.publicnode\.com|global\['!'\]=" "$f"; then
+              note "$f" "MALWARE: known dropper indicator (blockchain C2 endpoint / obfuscator marker)"
+            fi
+
+            # ---------- 2. STRUCTURAL OBFUSCATION ----------
+            # catches new variants with no known signature
+            LONGEST=$(awk '{ if (length($0) > m) m = length($0) } END { print m+0 }' "$f" 2>/dev/null)
+            case "$f" in
+              *.js|*.mjs|*.cjs|*.ts|*.tsx|*.jsx)
+                # minified libraries legitimately have long lines; config/entry files do not
+                case "$f" in
+                  *.min.js|*bundle*|*chunk*) ;;
+                  *config*|*index.js|*server.js|*app.js|*main.js|*routes/*)
+                    if [ "${LONGEST:-0}" -gt 2000 ]; then
+                      note "$f" "OBFUSCATION: single line of ${LONGEST} chars in a config/entry file"
+                    fi
+                    if grep -qaE '[ ]{40,}[^ ]' "$f"; then
+                      note "$f" "OBFUSCATION: long whitespace padding used to hide code off-screen"
+                    fi
+                    if grep -qaE 'child_process|spawn\(|execSync|eval\(|new Function\(' "$f"; then
+                      note "$f" "SUSPICIOUS: process execution or eval inside a config/entry file"
+                    fi
+                    ;;
+                esac
+                # dense unicode escaping is an obfuscator hallmark
+                U=$(grep -oa '\\u00' "$f" 2>/dev/null | wc -l | tr -d ' ')
+                if [ "${U:-0}" -gt 50 ]; then
+                  note "$f" "OBFUSCATION: ${U} unicode escape sequences"
+                fi
+                ;;
+            esac
+
+            # ---------- 3. FILE TYPE vs EXTENSION MISMATCH ----------
+            # the attacker hid a JS payload in a .woff2 font
+            case "$f" in
+              *.woff|*.woff2|*.ttf|*.otf|*.eot|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.pdf|*.zip)
+                if file -b "$f" 2>/dev/null | grep -qiE 'ASCII|UTF-8|text'; then
+                  note "$f" "DISGUISED FILE: binary extension but the contents are text"
+                fi
+                ;;
+            esac
+
+            # ---------- 4. COMMITTED SECRETS ----------
+            case "$(basename "$f")" in
+              .env|.env.*)
+                case "$f" in
+                  *.example|*.sample|*.template) ;;
+                  *) note "$f" "SECRET: environment file committed" ;;
+                esac
+                ;;
+              id_rsa|id_dsa|id_ecdsa|id_ed25519|*.pem|*.p12|*.pfx|*.keystore|*.jks)
+                note "$f" "SECRET: private key or keystore committed"
+                ;;
+              .npmrc|.pypirc|credentials)
+                grep -qaE '_authToken|password|api_key' "$f" && \
+                  note "$f" "SECRET: credentials file with a token committed"
+                ;;
+            esac
+
+            # high-confidence token shapes (low false-positive patterns only)
+            if grep -qaE 'gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{60,}' "$f"; then
+              note "$f" "SECRET: GitHub token"
+            fi
+            if grep -qaE 'AKIA[0-9A-Z]{16}' "$f"; then
+              note "$f" "SECRET: AWS access key id"
+            fi
+            if grep -qaE 'sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}' "$f"; then
+              note "$f" "SECRET: Stripe live key"
+            fi
+            if grep -qaE 'xox[baprs]-[A-Za-z0-9-]{10,}' "$f"; then
+              note "$f" "SECRET: Slack token"
+            fi
+            if grep -qaE '"type": *"service_account"' "$f"; then
+              note "$f" "SECRET: Google service-account JSON"
+            fi
+            if grep -qaE -- '-----BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY' "$f"; then
+              note "$f" "SECRET: private key block"
+            fi
+            if grep -qaE '(postgres|postgresql|mysql|mongodb(\+srv)?)://[^:]+:[^@]{6,}@' "$f"; then
+              note "$f" "SECRET: database URL containing a password"
+            fi
+
+            # ---------- 5. DANGEROUS INSTALL SCRIPTS ----------
+            case "$(basename "$f")" in
+              package.json)
+                if grep -qaE '"(pre|post)?install"[^"]*"[^"]*(curl |wget |node -e|eval |bash -c|sh -c)' "$f"; then
+                  note "$f" "SUPPLY CHAIN: lifecycle script executes a remote or inline command"
+                fi
+                ;;
+            esac
+
+            # ---------- 6. WORKFLOW TAMPERING ----------
+            case "$f" in
+              .github/workflows/*)
+                grep -qaE '^\s{0,4}pull_request_target:' "$f" && \
+                  warn "$f" "WORKFLOW: uses pull_request_target — verify it does not check out PR code"
+                grep -qaE 'runs-on:\s*self-hosted' "$f" && \
+                  warn "$f" "WORKFLOW: targets self-hosted runner"
+                grep -qaE 'echo .*\$\{\{\s*secrets\.' "$f" && \
+                  note "$f" "WORKFLOW: prints a secret to the log"
+                grep -qaE 'curl [^|]*\|\s*(bash|sh)|wget [^|]*\|\s*(bash|sh)' "$f" && \
+                  note "$f" "WORKFLOW: pipes a remote script straight into a shell"
+                ;;
+            esac
+
+          done < /tmp/scan.txt
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Blocked.** Remove the flagged content, or contact the security owner if this is a false positive." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "No issues found." >> $GITHUB_STEP_SUMMARY
